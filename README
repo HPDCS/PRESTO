@@ -1,0 +1,19 @@
+REQUIREMENTS:
+
+Timestretch module needs the linux kernel 3.16.7-7 SMP x86_64 version. The following libraries are needed: FANN (even if not enabled in our experiments) and TinySTM (1.0.0 release); both included in the archive file. Atomic_ops library is the default one, and staticaly included within the TinySTM source path.
+
+
+INSTALLATION:
+
+To install Timestretch module follow instruction included in the timestretch GIT branch. Once all dependencies are satisfied, a simple "make -f Makefile.stm" is enough to complete the compilation and linking steps (both Server and Client sides).
+
+
+LAUNCH PROGRAM:
+
+In order to make a correct execution of the program, launch the server (a) before client (b) in the relative dir paths as follow:
+
+	a) ./tpcc  ServerPort  PoolSize  NumberOfTransactionalThreads
+
+	b) ./tpcc  ServerAddress  ServerPort  GroupNumber  GroupSize  NumberOfTransactionPerClient  ArrivalRatePerClient(txs/sec.)
+
+where the GroupSize reflects the number of threads at the server side that deliver packets at its own socket, while GroupSize is the number of client processes that send packets towards one and only one socket. The total number of client processes is clearly the product of these two last parameters.

@@ -1,0 +1,151 @@
+/**
+*                       Copyright (C) 2008-2015 HPDCS Group
+*                       http://www.dis.uniroma1.it/~hpdcs
+*
+* @file ult.c
+* @brief The User-Level Thread module allows the creation/scheduling of a user-level thread
+* 	in an architecture-dependent way.
+* @author Alessandro Pellegrini
+*/
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <signal.h>
+#include <assert.h>
+#include <errno.h>
+#include <sys/mman.h>
+
+#include "ult.h"
+
+/* Execution context of a worker_thread out of any transaction context */
+__thread exec_context_t					platform_context;
+/* The task_t structure associated to the currently running transaction */
+__thread task_t*						running_task;
+
+static __thread exec_context_t			context_caller;
+static __thread volatile sig_atomic_t	context_called;
+
+static __thread exec_context_t*			context_creat;
+static __thread void					(*context_creat_func)(void*);
+static __thread void*					context_creat_arg;
+
+
+/**
+* When this function is called, a zeroed page-aligned stack for the ULT is created and returned.
+* The size of the stack can be specified by using the parameter. It's suggested to give a stack
+* size which is a multiple of the page size. Nevertheless, no check is done by this function.
+*
+* @author Alessandro Pellegrini
+*
+* @param size The size of the requested stack
+* @return A pointer to the allocated and zeroed page-aligned stack
+*/
+void* get_ult_stack(unsigned int lid, size_t size) {
+	void* stack;
+	size_t reminder;
+
+	if (size <= 0) {
+		size = STACK_SIZE;
+	}
+
+	reminder = size % getpagesize();
+	if (reminder != 0) {
+		size += getpagesize() - reminder;
+	}
+
+	if ((stack = malloc(size)) == NULL)
+		return NULL;
+
+	memset(stack, 0, size);
+
+	return stack;
+}
+
+
+/**
+* This function is called within the already-created user-level thread. The goal of this function is to
+* setup a new (clean) frame (we're coming back from a signal handler!) and to prepare the user-level thread
+* to jump into its entry point. This entry point is supposed to be implemented as it never returns!
+* For further details, refer to the paper:
+*
+* Ralf S. Engelschall
+* "Portable Multithreading: the Signal Stack Trick for User-Space Thread Creation"
+* Proceedings of the 2000 USENIX Annual Technical Conference
+* June 2000
+*
+* @author Ralf Engelschall
+*/
+static void context_create_boot(void) __attribute__ ((noreturn));
+static void context_create_boot(void) {
+	void (*context_start_func)(void*);
+	void* context_start_arg;
+
+	context_start_func = context_creat_func;
+	context_start_arg = context_creat_arg;
+
+	context_switch(context_creat, &context_caller);
+
+	context_start_func(context_start_arg);
+
+	// TODO: Will I never reach this?
+	assert(0);
+}
+
+
+/**
+* This function is executed within a manually-induced signal handler, which allows to create a new execution
+* context and set the LP stack. We save the context and then return, to leave the signal scope.
+* After the signal handler returns, the context_creat context is restored, so that the final bootstrap function
+* is actually executed.
+*/
+static void context_create_trampoline(int sig) {
+	(void) sig;
+
+	if (context_save(context_creat) == 0)
+		return;
+
+	context_create_boot();
+}
+
+
+/**
+* This function is executed within a manually-induced signal handler, which allows to create a new execution
+* context and set the LP stack. We save the context and then return, to leave the signal scope.
+* After the signal handler returns, the context_creat context is restored, so that the final bootstrap function
+* is actually executed.
+*
+* @param context the variable where to store the execution context for the created user-level thread
+* @param entry_point the function which must be executed when the newly created thread is first activated
+* @param args pointer to arguments to be passed to the thread entry point
+* @param stack a pointer to a memory area to be used as LP stack
+* @param stack_size size of the memory area to be used as stack
+*/
+void context_create(exec_context_t* context, void (*entry_point)(void*), void* args, void* stack, size_t stack_size) {
+	struct sigaction sa;
+	struct sigaltstack ss;
+	struct sigaltstack oss;
+
+	memset((void*) &sa, 0, sizeof(struct sigaction));
+	sa.sa_handler = context_create_trampoline;
+	sa.sa_flags = SA_ONSTACK;
+	sigfillset(&sa.sa_mask);
+	sigdelset(&sa.sa_mask, SIGUSR1);
+	sigaction(SIGUSR1, &sa, NULL);
+
+	ss.ss_sp = stack;
+	ss.ss_size = stack_size;
+	ss.ss_flags = 0;
+	sigaltstack(&ss, &oss);
+
+	context_creat = context;
+	context_creat_func = entry_point;
+	context_creat_arg = args;
+	context_called = false;
+
+	raise(SIGUSR1);
+	sigaltstack(&oss, NULL);
+
+	context_switch(&context_caller, context);
+}
